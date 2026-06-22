@@ -5,16 +5,11 @@ namespace App\Http\Controllers;
 use App\Models\Role;
 use App\Models\User;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Validation\ValidationException;
 
 class AuthController extends Controller
 {
-    /**
-     * Đăng ký - mặc định gán role CUSTOMER
-     * Mật khẩu BẮT BUỘC mã hóa bằng Hash::make() (bcrypt) trước khi lưu DB.
-     */
     public function register(Request $request)
     {
         $data = $request->validate([
@@ -28,14 +23,13 @@ class AuthController extends Controller
         $user = User::create([
             'full_name'     => $data['fullName'],
             'email'         => $data['email'],
-            'password_hash' => Hash::make($data['password']), // mã hóa mật khẩu - yêu cầu 1.2
+            'password_hash' => Hash::make($data['password']),
             'role_id'       => $customerRole->id,
         ]);
 
-        Auth::login($user); // tạo session, Laravel tự set cookie session (httpOnly)
-        $request->session()->regenerate(); // chống session fixation attack
+        $token = $user->createToken('api-token')->plainTextToken;
 
-        return response()->json(['user' => $this->formatUser($user)]);
+        return response()->json(['user' => $this->formatUser($user), 'token' => $token]);
     }
 
     public function login(Request $request)
@@ -48,29 +42,20 @@ class AuthController extends Controller
         $user = User::where('email', $data['email'])->first();
 
         if (!$user || !Hash::check($data['password'], $user->password_hash)) {
-            throw ValidationException::withMessages([
-                'email' => ['Email hoặc mật khẩu không đúng'],
-            ]);
+            throw ValidationException::withMessages(['email' => ['Email hoặc mật khẩu không đúng']]);
         }
-
         if (!$user->is_active) {
-            throw ValidationException::withMessages([
-                'email' => ['Tài khoản đã bị khóa'],
-            ]);
+            throw ValidationException::withMessages(['email' => ['Tài khoản đã bị khóa']]);
         }
 
-        Auth::login($user);
-        $request->session()->regenerate();
+        $token = $user->createToken('api-token')->plainTextToken;
 
-        return response()->json(['user' => $this->formatUser($user)]);
+        return response()->json(['user' => $this->formatUser($user), 'token' => $token]);
     }
 
     public function logout(Request $request)
     {
-        Auth::logout();
-        $request->session()->invalidate();
-        $request->session()->regenerateToken();
-
+        $request->user()->currentAccessToken()->delete();
         return response()->json(['message' => 'Đăng xuất thành công']);
     }
 
