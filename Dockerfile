@@ -1,11 +1,12 @@
-FROM php:8.2-cli
+FROM php:8.2-fpm
 
-# Cài các extension PHP cần thiết cho Laravel + MySQL
+# Cài Nginx, Supervisor (quản lý 2 tiến trình PHP-FPM + Nginx cùng lúc), và các extension PHP
 RUN apt-get update && apt-get install -y \
-    git unzip libzip-dev libpng-dev libonig-dev libxml2-dev \
-    && docker-php-ext-install pdo_mysql mbstring zip exif pcntl bcmath gd opcache
+    nginx supervisor git unzip libzip-dev libpng-dev libonig-dev libxml2-dev gettext-base \
+    && docker-php-ext-install pdo_mysql mbstring zip exif pcntl bcmath gd opcache \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Bật OPcache để tăng tốc xử lý PHP (cache mã đã biên dịch giữa các request)
+# Bật OPcache để tăng tốc xử lý PHP
 RUN { \
     echo 'opcache.enable=1'; \
     echo 'opcache.memory_consumption=128'; \
@@ -19,9 +20,15 @@ COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
 WORKDIR /app
 COPY . .
 
-RUN composer install --no-dev --optimize-autoloader --no-interaction
+RUN composer install --no-dev --optimize-autoloader --no-interaction \
+    && chown -R www-data:www-data /app/storage /app/bootstrap/cache
 
-# Render cấp PORT qua biến môi trường, Laravel phải lắng nghe đúng cổng đó
+# Cấu hình Nginx + Supervisor
+COPY docker/nginx.conf.template /etc/nginx/sites-available/default.template
+COPY docker/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
+COPY docker/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
 EXPOSE 10000
 
-CMD php artisan config:cache && php artisan route:cache && php artisan migrate --force && php artisan serve --host 0.0.0.0 --port ${PORT:-10000}
+ENTRYPOINT ["/entrypoint.sh"]
