@@ -1,27 +1,21 @@
 <?php
 
 return [
-
-    /*
-    |--------------------------------------------------------------------------
-    | Cross-Origin Resource Sharing (CORS) Configuration
-    |--------------------------------------------------------------------------
-    |
-    | Here you may configure your settings for cross-origin resource sharing
-    | or "CORS". This determines what cross-origin operations may execute
-    | in web browsers. You are free to adjust these settings as needed.
-    |
-    | To learn more: https://developer.mozilla.org/en-US/docs/Web/HTTP/CORS
-    |
-    */
-
     'paths' => ['api/*', 'sanctum/csrf-cookie'],
 
     'allowed_methods' => ['*'],
 
-    'allowed_origins' => ['http://localhost:5173', 'https://cinema-booking-frontend-eight.vercel.app'],
+    // Liệt kê domain cụ thể
+    'allowed_origins' => [
+        'http://localhost:5173',
+        'https://cinema-booking-frontend-eight.vercel.app',
+    ],
 
-    'allowed_origins_patterns' => [],
+    // Dùng regex pattern để cho phép MỌI subdomain của Vercel thuộc project này
+    // (bao gồm cả preview URL như cinema-booking-frontend-xxxx.vercel.app)
+    'allowed_origins_patterns' => [
+        '#^https://cinema-booking-frontend.*\.vercel\.app$#',
+    ],
 
     'allowed_headers' => ['*'],
 
@@ -29,5 +23,6 @@ return [
 
     'max_age' => 0,
 
-    'supports_credentials' => true,
+    // Token-based auth không cần credentials=true nữa (không dùng cookie)
+    'supports_credentials' => false,
 ];
