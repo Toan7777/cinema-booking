@@ -68,14 +68,16 @@ Route::get('/movies-filter', function () {
     return response()->json($query->get());
 });
 
-/**
- * Helper dùng chung: tạo ghế hàng loạt cho 1 phòng (bulk insert thay vì insert từng dòng)
- * Bọc trong function_exists() vì file routes có thể được load nhiều lần trong 1 tiến trình
- * (ví dụ lúc artisan chạy route:cache / config:cache khi build) gây lỗi "Cannot redeclare".
- */
-if (!function_exists('seedSeatsForRoom')) {
-    function seedSeatsForRoom(int $roomId): void
-    {
+// ===== TẠM: Thêm rạp + phim mới =====
+// LƯU Ý: không dùng function global (function seedX(){...}) trong file routes,
+// vì Laravel serialize/cache route closures riêng biệt (route:cache khi deploy)
+// -> lúc closure cached chạy sẽ không thấy được hàm global khai báo ngoài, gây lỗi
+// "Call to undefined function". Thay vào đó, khai báo closure cục bộ ($seedSeats,
+// $seedBookingSeats) và dùng use(...) để mang theo vào trong transaction.
+Route::get('/maintenance/add-cinemas/{secret}', function ($secret) {
+    if ($secret !== 'addcinema2026') abort(403);
+
+    $seedSeats = function (int $roomId): void {
         $rowTypes = ['A' => 'NORMAL', 'B' => 'NORMAL', 'C' => 'VIP', 'D' => 'VIP', 'E' => 'COUPLE'];
         $rows = [];
         foreach ($rowTypes as $row => $type) {
@@ -90,15 +92,9 @@ if (!function_exists('seedSeatsForRoom')) {
             }
         }
         DB::table('seats')->insert($rows);
-    }
-}
+    };
 
-/**
- * Helper dùng chung: tạo booking_seats hàng loạt cho 1 showtime dựa trên các ghế của phòng
- */
-if (!function_exists('seedBookingSeatsForShowtime')) {
-    function seedBookingSeatsForShowtime(int $showtimeId, int $roomId): void
-    {
+    $seedBookingSeats = function (int $showtimeId, int $roomId): void {
         $seatIds = DB::table('seats')->where('room_id', $roomId)->pluck('id');
         if ($seatIds->isEmpty()) {
             return;
@@ -109,14 +105,9 @@ if (!function_exists('seedBookingSeatsForShowtime')) {
             'status' => 'AVAILABLE',
         ])->toArray();
         DB::table('booking_seats')->insert($rows);
-    }
-}
+    };
 
-// ===== TẠM: Thêm rạp + phim mới =====
-Route::get('/maintenance/add-cinemas/{secret}', function ($secret) {
-    if ($secret !== 'addcinema2026') abort(403);
-
-    return DB::transaction(function () {
+    return DB::transaction(function () use ($seedSeats, $seedBookingSeats) {
         // Thêm 2 rạp mới
         $cinema2 = DB::table('cinemas')->insertGetId([
             'name' => 'CGV Aeon Mall Long Biên',
@@ -132,8 +123,8 @@ Route::get('/maintenance/add-cinemas/{secret}', function ($secret) {
         $room3 = DB::table('rooms')->insertGetId(['cinema_id' => $cinema3, 'name' => 'Phòng 1', 'rows_count' => 5, 'cols_count' => 8]);
 
         // Thêm ghế cho 2 phòng mới (bulk insert)
-        seedSeatsForRoom($room2);
-        seedSeatsForRoom($room3);
+        $seedSeats($room2);
+        $seedSeats($room3);
 
         // Thêm 3 phim mới (sắp chiếu)
         $movie5 = DB::table('movies')->insertGetId([
@@ -168,7 +159,7 @@ Route::get('/maintenance/add-cinemas/{secret}', function ($secret) {
 
         foreach ($showtimeData as $st) {
             $showtimeId = DB::table('showtimes')->insertGetId($st);
-            seedBookingSeatsForShowtime($showtimeId, $st['room_id']);
+            $seedBookingSeats($showtimeId, $st['room_id']);
         }
 
         return response()->json([
@@ -183,7 +174,37 @@ Route::get('/maintenance/add-cinemas/{secret}', function ($secret) {
 Route::get('/maintenance/clean-movies/{secret}', function ($secret) {
     if ($secret !== 'cleanmovie2026') abort(403);
 
-    return DB::transaction(function () {
+    $seedSeats = function (int $roomId): void {
+        $rowTypes = ['A' => 'NORMAL', 'B' => 'NORMAL', 'C' => 'VIP', 'D' => 'VIP', 'E' => 'COUPLE'];
+        $rows = [];
+        foreach ($rowTypes as $row => $type) {
+            for ($col = 1; $col <= 8; $col++) {
+                $rows[] = [
+                    'room_id' => $roomId,
+                    'row_label' => $row,
+                    'col_number' => $col,
+                    'seat_type' => $type,
+                    'is_active' => true,
+                ];
+            }
+        }
+        DB::table('seats')->insert($rows);
+    };
+
+    $seedBookingSeats = function (int $showtimeId, int $roomId): void {
+        $seatIds = DB::table('seats')->where('room_id', $roomId)->pluck('id');
+        if ($seatIds->isEmpty()) {
+            return;
+        }
+        $rows = $seatIds->map(fn ($seatId) => [
+            'showtime_id' => $showtimeId,
+            'seat_id' => $seatId,
+            'status' => 'AVAILABLE',
+        ])->toArray();
+        DB::table('booking_seats')->insert($rows);
+    };
+
+    return DB::transaction(function () use ($seedSeats, $seedBookingSeats) {
         // Xóa toàn bộ dữ liệu liên quan (trừ id 1-12 đã có từ trước)
         DB::table('booking_seats')->whereIn('showtime_id', function ($q) {
             $q->select('id')->from('showtimes')->where('id', '>', 12);
@@ -209,8 +230,8 @@ Route::get('/maintenance/clean-movies/{secret}', function ($secret) {
         $room3 = DB::table('rooms')->insertGetId(['cinema_id' => $cinema3, 'name' => 'Phòng 1', 'rows_count' => 5, 'cols_count' => 8]);
 
         // Ghế (bulk insert)
-        seedSeatsForRoom($room2);
-        seedSeatsForRoom($room3);
+        $seedSeats($room2);
+        $seedSeats($room3);
 
         // 3 phim mới
         $movie5 = DB::table('movies')->insertGetId([
@@ -250,7 +271,7 @@ Route::get('/maintenance/clean-movies/{secret}', function ($secret) {
 
         foreach ($showtimes as $st) {
             $showtimeId = DB::table('showtimes')->insertGetId($st);
-            seedBookingSeatsForShowtime($showtimeId, $st['room_id']);
+            $seedBookingSeats($showtimeId, $st['room_id']);
         }
 
         return response()->json([
