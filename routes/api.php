@@ -70,40 +70,46 @@ Route::get('/movies-filter', function () {
 
 /**
  * Helper dùng chung: tạo ghế hàng loạt cho 1 phòng (bulk insert thay vì insert từng dòng)
+ * Bọc trong function_exists() vì file routes có thể được load nhiều lần trong 1 tiến trình
+ * (ví dụ lúc artisan chạy route:cache / config:cache khi build) gây lỗi "Cannot redeclare".
  */
-function seedSeatsForRoom(int $roomId): void
-{
-    $rowTypes = ['A' => 'NORMAL', 'B' => 'NORMAL', 'C' => 'VIP', 'D' => 'VIP', 'E' => 'COUPLE'];
-    $rows = [];
-    foreach ($rowTypes as $row => $type) {
-        for ($col = 1; $col <= 8; $col++) {
-            $rows[] = [
-                'room_id' => $roomId,
-                'row_label' => $row,
-                'col_number' => $col,
-                'seat_type' => $type,
-                'is_active' => true,
-            ];
+if (!function_exists('seedSeatsForRoom')) {
+    function seedSeatsForRoom(int $roomId): void
+    {
+        $rowTypes = ['A' => 'NORMAL', 'B' => 'NORMAL', 'C' => 'VIP', 'D' => 'VIP', 'E' => 'COUPLE'];
+        $rows = [];
+        foreach ($rowTypes as $row => $type) {
+            for ($col = 1; $col <= 8; $col++) {
+                $rows[] = [
+                    'room_id' => $roomId,
+                    'row_label' => $row,
+                    'col_number' => $col,
+                    'seat_type' => $type,
+                    'is_active' => true,
+                ];
+            }
         }
+        DB::table('seats')->insert($rows);
     }
-    DB::table('seats')->insert($rows);
 }
 
 /**
  * Helper dùng chung: tạo booking_seats hàng loạt cho 1 showtime dựa trên các ghế của phòng
  */
-function seedBookingSeatsForShowtime(int $showtimeId, int $roomId): void
-{
-    $seatIds = DB::table('seats')->where('room_id', $roomId)->pluck('id');
-    if ($seatIds->isEmpty()) {
-        return;
+if (!function_exists('seedBookingSeatsForShowtime')) {
+    function seedBookingSeatsForShowtime(int $showtimeId, int $roomId): void
+    {
+        $seatIds = DB::table('seats')->where('room_id', $roomId)->pluck('id');
+        if ($seatIds->isEmpty()) {
+            return;
+        }
+        $rows = $seatIds->map(fn ($seatId) => [
+            'showtime_id' => $showtimeId,
+            'seat_id' => $seatId,
+            'status' => 'AVAILABLE',
+        ])->toArray();
+        DB::table('booking_seats')->insert($rows);
     }
-    $rows = $seatIds->map(fn ($seatId) => [
-        'showtime_id' => $showtimeId,
-        'seat_id' => $seatId,
-        'status' => 'AVAILABLE',
-    ])->toArray();
-    DB::table('booking_seats')->insert($rows);
 }
 
 // ===== TẠM: Thêm rạp + phim mới =====
