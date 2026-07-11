@@ -6,11 +6,10 @@ use App\Http\Controllers\MovieController;
 use Illuminate\Support\Facades\Route;
 use Illuminate\Support\Facades\DB;
 
-// ===== AUTH (public) =====
+// ===== AUTH =====
 Route::post('/auth/register', [AuthController::class, 'register']);
 Route::post('/auth/login', [AuthController::class, 'login']);
 
-// ===== AUTH (cần đăng nhập) =====
 Route::middleware('auth:sanctum')->group(function () {
     Route::post('/auth/logout', [AuthController::class, 'logout']);
     Route::get('/auth/me', [AuthController::class, 'me']);
@@ -29,103 +28,117 @@ Route::middleware(['auth:sanctum', 'role:ADMIN'])->group(function () {
     Route::delete('/movies/{id}', [MovieController::class, 'destroy']);
 });
 
-// ===== Sơ đồ ghế =====
+// ===== PUBLIC APIs =====
 Route::get('/showtimes/{id}/seats', [BookingController::class, 'getSeatMap']);
-
-// ===== Route API lấy suất chiếu theo phim =====
 Route::get('/movies/{id}/showtimes', function ($id) {
     $showtimes = DB::table('showtimes')
-        ->where('movie_id', $id)
+        ->join('rooms', 'rooms.id', '=', 'showtimes.room_id')
+        ->join('cinemas', 'cinemas.id', '=', 'rooms.cinema_id')
+        ->where('showtimes.movie_id', $id)
+        ->select('showtimes.*', 'cinemas.name as cinema_name', 'cinemas.id as cinema_id', 'rooms.name as room_name')
         ->get();
     return response()->json($showtimes);
 });
 
-// ===== TẠM: dọn DB + seed phim mới - XÓA SAU KHI DÙNG =====
-Route::get('/maintenance/reset-and-seed/{secret}', function ($secret) {
-    if ($secret !== 'reset2026xyz') abort(403);
+// ===== API lấy danh sách rạp =====
+Route::get('/cinemas', function () {
+    return response()->json(DB::table('cinemas')->get());
+});
 
-    // Dọn dữ liệu cũ (giữ lại id=1, xóa trùng)
-    DB::table('booking_seats')->where('showtime_id', '>', 1)->delete();
-    DB::table('showtimes')->where('id', '>', 1)->delete();
-    DB::table('seats')->where('room_id', '>', 1)->delete();
-    DB::table('rooms')->where('id', '>', 1)->delete();
-    DB::table('cinemas')->where('id', '>', 1)->delete();
-    DB::table('movies')->where('id', '>', 1)->delete();
+// ===== API movies với filter =====
+Route::get('/movies-filter', function () {
+    $genre = request('genre');
+    $status = request('status'); // dang-chieu, sap-chieu
+    $cinema = request('cinema');
 
-    // Sửa phim id=1 thành tên hợp lệ
-    DB::table('movies')->where('id', 1)->update([
-        'title' => 'Hành Trình Vô Tận',
-        'duration_minutes' => 130,
-        'genre' => 'Khoa học viễn tưởng',
-        'description' => 'Một chuyến hành trình xuyên không gian đầy hiểm nguy.',
-        'poster_url' => 'https://images.unsplash.com/photo-1464802686167-b939a6910659?w=400&q=80',
+    $query = DB::table('movies');
+
+    if ($genre) {
+        $query->where('genre', 'like', "%$genre%");
+    }
+
+    if ($status === 'sap-chieu') {
+        $query->where('release_date', '>', now());
+    } elseif ($status === 'dang-chieu') {
+        $query->where(function($q) {
+            $q->whereNull('release_date')->orWhere('release_date', '<=', now());
+        });
+    }
+
+    return response()->json($query->get());
+});
+
+// ===== TẠM: Thêm rạp + phim mới =====
+Route::get('/maintenance/add-cinemas/{secret}', function ($secret) {
+    if ($secret !== 'addcinema2026') abort(403);
+
+    // Thêm 2 rạp mới
+    $cinema2 = DB::table('cinemas')->insertGetId([
+        'name' => 'CGV Aeon Mall Long Biên',
+        'address' => 'Số 27 Cổ Linh, Long Biên, Hà Nội',
+    ]);
+    $cinema3 = DB::table('cinemas')->insertGetId([
+        'name' => 'Lotte Cinema Landmark 72',
+        'address' => 'Keangnam Landmark72, Phạm Hùng, Hà Nội',
     ]);
 
-    // Thêm 3 phim mới
-    $movie2 = DB::table('movies')->insertGetId([
-        'title' => 'Mật Mã Đêm Tối',
-        'duration_minutes' => 115,
-        'genre' => 'Hành động / Bí ẩn',
-        'description' => 'Thám tử lừng danh truy tìm bí mật ẩn giấu trong bóng đêm.',
-        'poster_url' => 'https://images.unsplash.com/photo-1509347528160-9a9e33742cdb?w=400&q=80',
-    ]);
+    // Thêm phòng cho 2 rạp mới
+    $room2 = DB::table('rooms')->insertGetId(['cinema_id' => $cinema2, 'name' => 'Phòng 1', 'rows_count' => 5, 'cols_count' => 8]);
+    $room3 = DB::table('rooms')->insertGetId(['cinema_id' => $cinema3, 'name' => 'Phòng 1', 'rows_count' => 5, 'cols_count' => 8]);
 
-    $movie3 = DB::table('movies')->insertGetId([
-        'title' => 'Giấc Mơ Hollywood',
-        'duration_minutes' => 105,
+    // Thêm ghế cho 2 phòng mới
+    $rows = ['A' => 'NORMAL', 'B' => 'NORMAL', 'C' => 'VIP', 'D' => 'VIP', 'E' => 'COUPLE'];
+    foreach ([$room2, $room3] as $roomId) {
+        foreach ($rows as $row => $type) {
+            for ($col = 1; $col <= 8; $col++) {
+                DB::table('seats')->insert(['room_id' => $roomId, 'row_label' => $row, 'col_number' => $col, 'seat_type' => $type, 'is_active' => true]);
+            }
+        }
+    }
+
+    // Thêm 3 phim mới (sắp chiếu)
+    $movie5 = DB::table('movies')->insertGetId([
+        'title' => 'Chiến Binh Bóng Đêm',
+        'duration_minutes' => 125,
+        'genre' => 'Hành động',
+        'description' => 'Cuộc chiến sinh tử giữa ánh sáng và bóng tối.',
+        'poster_url' => 'https://images.unsplash.com/photo-1536440136628-849c177e76a1?w=400&q=80',
+    ]);
+    $movie6 = DB::table('movies')->insertGetId([
+        'title' => 'Tình Yêu Mùa Hạ',
+        'duration_minutes' => 100,
         'genre' => 'Tâm lý / Lãng mạn',
-        'description' => 'Câu chuyện tình yêu và ước mơ giữa kinh đô điện ảnh.',
-        'poster_url' => 'https://images.unsplash.com/photo-1519608425089-7f3bfa6f6bb8?w=400&q=80',
+        'description' => 'Câu chuyện tình yêu ngọt ngào dưới nắng hè.',
+        'poster_url' => 'https://images.unsplash.com/photo-1522869635100-9f4c5e86aa37?w=400&q=80',
+    ]);
+    $movie7 = DB::table('movies')->insertGetId([
+        'title' => 'Vũ Trụ Song Song',
+        'duration_minutes' => 140,
+        'genre' => 'Khoa học viễn tưởng',
+        'description' => 'Hành trình xuyên không gian và thời gian.',
+        'poster_url' => 'https://images.unsplash.com/photo-1446776877081-d282a0f896e2?w=400&q=80',
     ]);
 
-    $movie4 = DB::table('movies')->insertGetId([
-        'title' => 'Thành Phố Không Ngủ',
-        'duration_minutes' => 120,
-        'genre' => 'Hành động / Tội phạm',
-        'description' => 'Cuộc chiến sinh tử trong lòng thành phố không bao giờ ngủ.',
-        'poster_url' => 'https://images.unsplash.com/photo-1446776811953-b23d57bd21aa?w=400&q=80',
-    ]);
+    // Thêm suất chiếu cho các rạp mới
+    $showtimeData = [
+        ['movie_id' => 1,       'room_id' => $room2, 'start_time' => '2026-07-10 10:00:00', 'end_time' => '2026-07-10 12:10:00', 'base_price' => 80000],
+        ['movie_id' => $movie5, 'room_id' => $room2, 'start_time' => '2026-07-10 14:00:00', 'end_time' => '2026-07-10 16:05:00', 'base_price' => 85000],
+        ['movie_id' => $movie6, 'room_id' => $room3, 'start_time' => '2026-07-10 15:00:00', 'end_time' => '2026-07-10 16:40:00', 'base_price' => 75000],
+        ['movie_id' => $movie7, 'room_id' => $room3, 'start_time' => '2026-07-10 19:00:00', 'end_time' => '2026-07-10 21:20:00', 'base_price' => 90000],
+    ];
 
-    // Lấy room_id=1 và cinema_id=1 đã có
-    // Tạo suất chiếu cho 3 phim mới (dùng cùng phòng 1)
-    $showtime2 = DB::table('showtimes')->insertGetId([
-        'movie_id' => $movie2,
-        'room_id' => 1,
-        'start_time' => '2026-07-10 14:00:00',
-        'end_time' => '2026-07-10 15:55:00',
-        'base_price' => 80000,
-    ]);
-
-    $showtime3 = DB::table('showtimes')->insertGetId([
-        'movie_id' => $movie3,
-        'room_id' => 1,
-        'start_time' => '2026-07-10 16:30:00',
-        'end_time' => '2026-07-10 18:15:00',
-        'base_price' => 75000,
-    ]);
-
-    $showtime4 = DB::table('showtimes')->insertGetId([
-        'movie_id' => $movie4,
-        'room_id' => 1,
-        'start_time' => '2026-07-10 20:00:00',
-        'end_time' => '2026-07-10 22:00:00',
-        'base_price' => 85000,
-    ]);
-
-    // Seed booking_seats cho 3 suất chiếu mới
-    $seatIds = DB::table('seats')->where('room_id', 1)->pluck('id');
-    foreach ([$showtime2, $showtime3, $showtime4] as $showtimeId) {
-        $rows = $seatIds->map(fn($seatId) => [
-            'showtime_id' => $showtimeId,
-            'seat_id' => $seatId,
-            'status' => 'AVAILABLE',
-        ])->toArray();
-        DB::table('booking_seats')->insert($rows);
+    foreach ($showtimeData as $st) {
+        $showtimeId = DB::table('showtimes')->insertGetId($st);
+        $roomId = $st['room_id'];
+        $seatIds = DB::table('seats')->where('room_id', $roomId)->pluck('id');
+        foreach ($seatIds as $seatId) {
+            DB::table('booking_seats')->insert(['showtime_id' => $showtimeId, 'seat_id' => $seatId, 'status' => 'AVAILABLE']);
+        }
     }
 
     return response()->json([
-        'message' => 'Dọn + seed thành công!',
+        'message' => 'Thêm rạp + phim thành công!',
+        'cinemas' => DB::table('cinemas')->get(),
         'movies' => DB::table('movies')->get(),
-        'showtimes' => DB::table('showtimes')->get(),
     ]);
 });
