@@ -18,7 +18,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/bookings/confirm', [BookingController::class, 'confirmBooking']);
 });
 
-// ===== MOVIES =====
+// ===== MOVIES (public đọc) =====
 Route::get('/movies', [MovieController::class, 'index']);
 Route::get('/movies/{id}', [MovieController::class, 'show']);
 
@@ -40,12 +40,10 @@ Route::get('/movies/{id}/showtimes', function ($id) {
     return response()->json($showtimes);
 });
 
-// ===== API lấy danh sách rạp =====
 Route::get('/cinemas', function () {
     return response()->json(DB::table('cinemas')->get());
 });
 
-// ===== API movies với filter =====
 Route::get('/movies-filter', function () {
     $genre = request('genre');
     $status = request('status'); // dang-chieu, sap-chieu
@@ -68,12 +66,214 @@ Route::get('/movies-filter', function () {
     return response()->json($query->get());
 });
 
+// ===== ADMIN ROUTES =====
+Route::middleware(['auth:sanctum', 'role:ADMIN'])->prefix('admin')->group(function () {
+
+    // --- CINEMAS CRUD ---
+    Route::get('/cinemas', function () {
+        return response()->json(DB::table('cinemas')->get());
+    });
+    Route::post('/cinemas', function (\Illuminate\Http\Request $req) {
+        $data = $req->validate([
+            'name' => 'required|string|max:255',
+            'address' => 'nullable|string|max:255',
+        ]);
+        $id = DB::table('cinemas')->insertGetId($data);
+        return response()->json(DB::table('cinemas')->find($id), 201);
+    });
+    Route::patch('/cinemas/{id}', function (\Illuminate\Http\Request $req, $id) {
+        $data = $req->validate([
+            'name' => 'sometimes|required|string|max:255',
+            'address' => 'nullable|string|max:255',
+        ]);
+        DB::table('cinemas')->where('id', $id)->update($data);
+        return response()->json(DB::table('cinemas')->find($id));
+    });
+    Route::delete('/cinemas/{id}', function ($id) {
+        $hasRooms = DB::table('rooms')->where('cinema_id', $id)->exists();
+        if ($hasRooms) {
+            return response()->json(['message' => 'Không thể xóa: rạp còn phòng chiếu. Hãy xóa phòng trước.'], 422);
+        }
+        DB::table('cinemas')->where('id', $id)->delete();
+        return response()->json(['message' => 'Đã xóa rạp']);
+    });
+
+    // --- ROOMS CRUD ---
+    Route::get('/rooms', function () {
+        return response()->json(
+            DB::table('rooms')
+                ->join('cinemas', 'cinemas.id', '=', 'rooms.cinema_id')
+                ->select('rooms.*', 'cinemas.name as cinema_name')
+                ->orderBy('rooms.cinema_id')
+                ->get()
+        );
+    });
+    Route::get('/cinemas/{cinemaId}/rooms', function ($cinemaId) {
+        return response()->json(DB::table('rooms')->where('cinema_id', $cinemaId)->get());
+    });
+    Route::post('/rooms', function (\Illuminate\Http\Request $req) {
+        $data = $req->validate([
+            'cinema_id' => 'required|integer|exists:cinemas,id',
+            'name' => 'required|string|max:255',
+            'rows_count' => 'required|integer|min:1|max:26',
+            'cols_count' => 'required|integer|min:1|max:40',
+        ]);
+        return DB::transaction(function () use ($data) {
+            $roomId = DB::table('rooms')->insertGetId($data);
+            $rowLabels = range('A', chr(64 + $data['rows_count']));
+            $seatRows = [];
+            foreach ($rowLabels as $i => $row) {
+                $type = $i >= count($rowLabels) - 2 ? 'VIP' : 'NORMAL';
+                if ($i === count($rowLabels) - 1) $type = 'COUPLE';
+                for ($col = 1; $col <= $data['cols_count']; $col++) {
+                    $seatRows[] = [
+                        'room_id' => $roomId, 'row_label' => $row, 'col_number' => $col,
+                        'seat_type' => $type, 'is_active' => true,
+                    ];
+                }
+            }
+            DB::table('seats')->insert($seatRows);
+            return response()->json(DB::table('rooms')->find($roomId), 201);
+        });
+    });
+    Route::delete('/rooms/{id}', function ($id) {
+        $hasShowtimes = DB::table('showtimes')->where('room_id', $id)->exists();
+        if ($hasShowtimes) {
+            return response()->json(['message' => 'Không thể xóa: phòng còn suất chiếu.'], 422);
+        }
+        DB::table('seats')->where('room_id', $id)->delete();
+        DB::table('rooms')->where('id', $id)->delete();
+        return response()->json(['message' => 'Đã xóa phòng']);
+    });
+
+    // --- SHOWTIMES CRUD ---
+    Route::get('/showtimes', function () {
+        return response()->json(
+            DB::table('showtimes')
+                ->join('movies', 'movies.id', '=', 'showtimes.movie_id')
+                ->join('rooms', 'rooms.id', '=', 'showtimes.room_id')
+                ->join('cinemas', 'cinemas.id', '=', 'rooms.cinema_id')
+                ->select(
+                    'showtimes.*',
+                    'movies.title as movie_title',
+                    'rooms.name as room_name',
+                    'cinemas.name as cinema_name',
+                    'cinemas.id as cinema_id'
+                )
+                ->orderBy('showtimes.start_time', 'desc')
+                ->get()
+        );
+    });
+    Route::post('/showtimes', function (\Illuminate\Http\Request $req) {
+        $data = $req->validate([
+            'movie_id'   => 'required|integer|exists:movies,id',
+            'room_id'    => 'required|integer|exists:rooms,id',
+            'start_time' => 'required|date',
+            'end_time'   => 'required|date|after:start_time',
+            'base_price' => 'required|numeric|min:0',
+        ]);
+        return DB::transaction(function () use ($data) {
+            $showtimeId = DB::table('showtimes')->insertGetId($data);
+            $seatIds = DB::table('seats')->where('room_id', $data['room_id'])->pluck('id');
+            $rows = $seatIds->map(fn ($seatId) => [
+                'showtime_id' => $showtimeId, 'seat_id' => $seatId, 'status' => 'AVAILABLE',
+            ])->toArray();
+            if (!empty($rows)) {
+                DB::table('booking_seats')->insert($rows);
+            }
+            return response()->json(DB::table('showtimes')->find($showtimeId), 201);
+        });
+    });
+    Route::patch('/showtimes/{id}', function (\Illuminate\Http\Request $req, $id) {
+        $data = $req->validate([
+            'start_time' => 'sometimes|required|date',
+            'end_time'   => 'sometimes|required|date',
+            'base_price' => 'sometimes|required|numeric|min:0',
+        ]);
+        DB::table('showtimes')->where('id', $id)->update($data);
+        return response()->json(DB::table('showtimes')->find($id));
+    });
+    Route::delete('/showtimes/{id}', function ($id) {
+        $hasBookings = DB::table('bookings')->where('showtime_id', $id)->where('status', 'PAID')->exists();
+        if ($hasBookings) {
+            return response()->json(['message' => 'Không thể xóa: suất chiếu đã có vé đặt.'], 422);
+        }
+        DB::table('booking_seats')->where('showtime_id', $id)->delete();
+        DB::table('showtimes')->where('id', $id)->delete();
+        return response()->json(['message' => 'Đã xóa suất chiếu']);
+    });
+
+    // --- BOOKINGS ---
+    Route::get('/bookings', function () {
+        return response()->json(
+            DB::table('bookings')
+                ->join('users', 'users.id', '=', 'bookings.user_id')
+                ->join('showtimes', 'showtimes.id', '=', 'bookings.showtime_id')
+                ->join('movies', 'movies.id', '=', 'showtimes.movie_id')
+                ->join('rooms', 'rooms.id', '=', 'showtimes.room_id')
+                ->join('cinemas', 'cinemas.id', '=', 'rooms.cinema_id')
+                ->select(
+                    'bookings.*',
+                    'users.full_name as user_name',
+                    'users.email as user_email',
+                    'movies.title as movie_title',
+                    'showtimes.start_time',
+                    'cinemas.name as cinema_name'
+                )
+                ->orderBy('bookings.created_at', 'desc')
+                ->get()
+        );
+    });
+
+    // --- STATS / DOANH THU ---
+    Route::get('/stats', function () {
+        $totalRevenue = DB::table('bookings')->where('status', 'PAID')->sum('total_amount');
+        $totalBookings = DB::table('bookings')->where('status', 'PAID')->count();
+        $totalUsers = DB::table('users')->count();
+        $totalMovies = DB::table('movies')->count();
+
+        $revenueByMovie = DB::table('bookings')
+            ->join('showtimes', 'showtimes.id', '=', 'bookings.showtime_id')
+            ->join('movies', 'movies.id', '=', 'showtimes.movie_id')
+            ->where('bookings.status', 'PAID')
+            ->select('movies.title', DB::raw('SUM(bookings.total_amount) as revenue'), DB::raw('COUNT(*) as bookings_count'))
+            ->groupBy('movies.id', 'movies.title')
+            ->orderBy('revenue', 'desc')
+            ->get();
+
+        $revenueByCinema = DB::table('bookings')
+            ->join('showtimes', 'showtimes.id', '=', 'bookings.showtime_id')
+            ->join('rooms', 'rooms.id', '=', 'showtimes.room_id')
+            ->join('cinemas', 'cinemas.id', '=', 'rooms.cinema_id')
+            ->where('bookings.status', 'PAID')
+            ->select('cinemas.name', DB::raw('SUM(bookings.total_amount) as revenue'), DB::raw('COUNT(*) as bookings_count'))
+            ->groupBy('cinemas.id', 'cinemas.name')
+            ->orderBy('revenue', 'desc')
+            ->get();
+
+        $recentBookings = DB::table('bookings')
+            ->join('users', 'users.id', '=', 'bookings.user_id')
+            ->join('showtimes', 'showtimes.id', '=', 'bookings.showtime_id')
+            ->join('movies', 'movies.id', '=', 'showtimes.movie_id')
+            ->where('bookings.status', 'PAID')
+            ->select('bookings.id', 'bookings.total_amount', 'bookings.created_at', 'users.full_name as user_name', 'movies.title as movie_title')
+            ->orderBy('bookings.created_at', 'desc')
+            ->limit(10)
+            ->get();
+
+        return response()->json([
+            'total_revenue'     => $totalRevenue,
+            'total_bookings'    => $totalBookings,
+            'total_users'       => $totalUsers,
+            'total_movies'      => $totalMovies,
+            'revenue_by_movie'  => $revenueByMovie,
+            'revenue_by_cinema' => $revenueByCinema,
+            'recent_bookings'   => $recentBookings,
+        ]);
+    });
+});
+
 // ===== TẠM: Thêm rạp + phim mới =====
-// LƯU Ý: không dùng function global (function seedX(){...}) trong file routes,
-// vì Laravel serialize/cache route closures riêng biệt (route:cache khi deploy)
-// -> lúc closure cached chạy sẽ không thấy được hàm global khai báo ngoài, gây lỗi
-// "Call to undefined function". Thay vào đó, khai báo closure cục bộ ($seedSeats,
-// $seedBookingSeats) và dùng use(...) để mang theo vào trong transaction.
 Route::get('/maintenance/add-cinemas/{secret}', function ($secret) {
     if ($secret !== 'addcinema2026') abort(403);
 
@@ -108,7 +308,6 @@ Route::get('/maintenance/add-cinemas/{secret}', function ($secret) {
     };
 
     return DB::transaction(function () use ($seedSeats, $seedBookingSeats) {
-        // Thêm 2 rạp mới
         $cinema2 = DB::table('cinemas')->insertGetId([
             'name' => 'CGV Aeon Mall Long Biên',
             'address' => 'Số 27 Cổ Linh, Long Biên, Hà Nội',
@@ -118,15 +317,12 @@ Route::get('/maintenance/add-cinemas/{secret}', function ($secret) {
             'address' => 'Keangnam Landmark72, Phạm Hùng, Hà Nội',
         ]);
 
-        // Thêm phòng cho 2 rạp mới
         $room2 = DB::table('rooms')->insertGetId(['cinema_id' => $cinema2, 'name' => 'Phòng 1', 'rows_count' => 5, 'cols_count' => 8]);
         $room3 = DB::table('rooms')->insertGetId(['cinema_id' => $cinema3, 'name' => 'Phòng 1', 'rows_count' => 5, 'cols_count' => 8]);
 
-        // Thêm ghế cho 2 phòng mới (bulk insert)
         $seedSeats($room2);
         $seedSeats($room3);
 
-        // Thêm 3 phim mới (sắp chiếu)
         $movie5 = DB::table('movies')->insertGetId([
             'title' => 'Chiến Binh Bóng Đêm',
             'duration_minutes' => 125,
@@ -149,7 +345,6 @@ Route::get('/maintenance/add-cinemas/{secret}', function ($secret) {
             'poster_url' => 'https://images.unsplash.com/photo-1446776877081-d282a0f896e2?w=400&q=80',
         ]);
 
-        // Thêm suất chiếu cho các rạp mới
         $showtimeData = [
             ['movie_id' => 1,       'room_id' => $room2, 'start_time' => '2026-07-10 10:00:00', 'end_time' => '2026-07-10 12:10:00', 'base_price' => 80000],
             ['movie_id' => $movie5, 'room_id' => $room2, 'start_time' => '2026-07-10 14:00:00', 'end_time' => '2026-07-10 16:05:00', 'base_price' => 85000],
@@ -205,7 +400,6 @@ Route::get('/maintenance/clean-movies/{secret}', function ($secret) {
     };
 
     return DB::transaction(function () use ($seedSeats, $seedBookingSeats) {
-        // Xóa toàn bộ dữ liệu liên quan (trừ id 1-12 đã có từ trước)
         DB::table('booking_seats')->whereIn('showtime_id', function ($q) {
             $q->select('id')->from('showtimes')->where('id', '>', 12);
         })->delete();
@@ -215,7 +409,6 @@ Route::get('/maintenance/clean-movies/{secret}', function ($secret) {
         DB::table('cinemas')->where('id', '>', 1)->delete();
         DB::table('movies')->where('id', '>', 12)->delete();
 
-        // Giờ thêm lại đúng 1 lần
         $cinema2 = DB::table('cinemas')->insertGetId([
             'name' => 'CGV Aeon Mall Long Biên',
             'address' => 'Số 27 Cổ Linh, Long Biên, Hà Nội',
@@ -225,15 +418,12 @@ Route::get('/maintenance/clean-movies/{secret}', function ($secret) {
             'address' => 'Keangnam Landmark72, Phạm Hùng, Hà Nội',
         ]);
 
-        // Phòng
         $room2 = DB::table('rooms')->insertGetId(['cinema_id' => $cinema2, 'name' => 'Phòng 1', 'rows_count' => 5, 'cols_count' => 8]);
         $room3 = DB::table('rooms')->insertGetId(['cinema_id' => $cinema3, 'name' => 'Phòng 1', 'rows_count' => 5, 'cols_count' => 8]);
 
-        // Ghế (bulk insert)
         $seedSeats($room2);
         $seedSeats($room3);
 
-        // 3 phim mới
         $movie5 = DB::table('movies')->insertGetId([
             'title' => 'Chiến Binh Bóng Đêm',
             'duration_minutes' => 125,
@@ -256,14 +446,10 @@ Route::get('/maintenance/clean-movies/{secret}', function ($secret) {
             'poster_url' => 'https://images.unsplash.com/photo-1446776877081-d282a0f896e2?w=400&q=80',
         ]);
 
-        // Suất chiếu: phim cũ chiếu ở rạp mới + phim mới
         $showtimes = [
-            // Phim cũ chiếu ở rạp 2 (CGV Long Biên)
             ['movie_id' => 1,       'room_id' => $room2, 'start_time' => '2026-07-12 10:00:00', 'end_time' => '2026-07-12 12:10:00', 'base_price' => 80000],
             ['movie_id' => 10,      'room_id' => $room2, 'start_time' => '2026-07-12 14:00:00', 'end_time' => '2026-07-12 15:55:00', 'base_price' => 85000],
-            // Phim mới ở rạp 2
             ['movie_id' => $movie5, 'room_id' => $room2, 'start_time' => '2026-07-12 18:00:00', 'end_time' => '2026-07-12 20:05:00', 'base_price' => 85000],
-            // Phim ở rạp 3 (Lotte Landmark)
             ['movie_id' => 1,       'room_id' => $room3, 'start_time' => '2026-07-12 11:00:00', 'end_time' => '2026-07-12 13:10:00', 'base_price' => 90000],
             ['movie_id' => $movie6, 'room_id' => $room3, 'start_time' => '2026-07-12 15:00:00', 'end_time' => '2026-07-12 16:40:00', 'base_price' => 75000],
             ['movie_id' => $movie7, 'room_id' => $room3, 'start_time' => '2026-07-12 19:00:00', 'end_time' => '2026-07-12 21:20:00', 'base_price' => 90000],
