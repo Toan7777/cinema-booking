@@ -5,6 +5,7 @@ use App\Http\Controllers\BookingController;
 use App\Http\Controllers\MovieController;
 use Illuminate\Support\Facades\Route;
 use Illuminate\Support\Facades\DB;
+use Carbon\Carbon;
 
 // ===== AUTH =====
 Route::post('/auth/register', [AuthController::class, 'register']);
@@ -465,6 +466,116 @@ Route::get('/maintenance/clean-movies/{secret}', function ($secret) {
             'cinemas' => DB::table('cinemas')->get(),
             'movies_count' => DB::table('movies')->count(),
             'showtimes_count' => DB::table('showtimes')->count(),
+        ]);
+    });
+});
+
+// ===== LỊCH CHIẾU ĐỘNG: tự sinh suất chiếu cho 7 ngày tới =====
+// Cách hoạt động:
+// 1) "Mẫu" suất chiếu = các tổ hợp (phim, phòng, giờ:phút trong ngày, giá vé)
+//    đang có trong bảng showtimes, bất kể đang gắn ngày nào.
+// 2) Với mỗi mẫu, đảm bảo có đủ suất chiếu cho 7 ngày kể từ hôm nay
+//    (thiếu ngày nào thì tạo ngày đó — giữ nguyên giờ, chỉ đổi ngày),
+//    đồng thời tự sinh booking_seats để có thể đặt ghế ngay.
+// 3) Dọn các suất chiếu đã QUA ngày hôm nay — trừ suất đã có vé PAID
+//    (giữ lại để không phá lịch sử đơn hàng).
+// Gọi route này 1 lần để bootstrap, sau đó lên lịch gọi mỗi ngày 1 lần
+// (qua cron ngoài, vì Render free không có cron sẵn) để lịch luôn "lăn" đúng 7 ngày.
+Route::get('/maintenance/roll-showtimes/{secret}', function ($secret) {
+    if ($secret !== 'rollshowtime2026') abort(403);
+
+    return DB::transaction(function () {
+        $today = Carbon::today();
+        $windowDates = collect(range(0, 6))->map(fn ($i) => $today->copy()->addDays($i)->toDateString());
+
+        // Lấy toàn bộ suất chiếu hiện có kèm thời lượng phim.
+        // Xử lý bằng PHP (không dùng hàm ngày giờ riêng của từng DB engine)
+        // để chạy được trên cả MySQL lẫn PostgreSQL.
+        $allShowtimes = DB::table('showtimes')
+            ->join('movies', 'movies.id', '=', 'showtimes.movie_id')
+            ->select('showtimes.movie_id', 'showtimes.room_id', 'showtimes.base_price', 'showtimes.start_time', 'movies.duration_minutes')
+            ->get();
+
+        // Rút ra "mẫu": mỗi tổ hợp (phim, phòng, giờ, giá) chỉ giữ 1 bản
+        $templates = [];
+        foreach ($allShowtimes as $st) {
+            $timeOfDay = Carbon::parse($st->start_time)->format('H:i:s');
+            $key = $st->movie_id . '|' . $st->room_id . '|' . $timeOfDay . '|' . $st->base_price;
+            $templates[$key] = [
+                'movie_id' => $st->movie_id,
+                'room_id' => $st->room_id,
+                'base_price' => $st->base_price,
+                'time_of_day' => $timeOfDay,
+                'duration_minutes' => $st->duration_minutes,
+            ];
+        }
+
+        // Đánh dấu các suất đã tồn tại để không tạo trùng
+        $existingKeys = [];
+        foreach ($allShowtimes as $st) {
+            $d = Carbon::parse($st->start_time)->format('Y-m-d');
+            $t = Carbon::parse($st->start_time)->format('H:i:s');
+            $existingKeys[$d . '|' . $st->movie_id . '|' . $st->room_id . '|' . $t] = true;
+        }
+
+        $created = 0;
+        foreach ($windowDates as $dateStr) {
+            foreach ($templates as $tpl) {
+                $lookupKey = $dateStr . '|' . $tpl['movie_id'] . '|' . $tpl['room_id'] . '|' . $tpl['time_of_day'];
+                if (isset($existingKeys[$lookupKey])) {
+                    continue;
+                }
+
+                $startTime = Carbon::parse("$dateStr {$tpl['time_of_day']}");
+                $endTime = $startTime->copy()->addMinutes((int) $tpl['duration_minutes']);
+
+                $showtimeId = DB::table('showtimes')->insertGetId([
+                    'movie_id'   => $tpl['movie_id'],
+                    'room_id'    => $tpl['room_id'],
+                    'start_time' => $startTime->toDateTimeString(),
+                    'end_time'   => $endTime->toDateTimeString(),
+                    'base_price' => $tpl['base_price'],
+                ]);
+
+                $seatIds = DB::table('seats')->where('room_id', $tpl['room_id'])->pluck('id');
+                $rows = $seatIds->map(fn ($seatId) => [
+                    'showtime_id' => $showtimeId,
+                    'seat_id'     => $seatId,
+                    'status'      => 'AVAILABLE',
+                ])->toArray();
+                if (!empty($rows)) {
+                    DB::table('booking_seats')->insert($rows);
+                }
+
+                $existingKeys[$lookupKey] = true;
+                $created++;
+            }
+        }
+
+        // Dọn các suất chiếu đã qua ngày hôm nay, trừ suất đã có vé PAID
+        $pastShowtimeIds = DB::table('showtimes')
+            ->get(['id', 'start_time'])
+            ->filter(fn ($s) => Carbon::parse($s->start_time)->lt($today))
+            ->pluck('id');
+
+        $protectedIds = DB::table('bookings')
+            ->whereIn('showtime_id', $pastShowtimeIds)
+            ->where('status', 'PAID')
+            ->pluck('showtime_id')
+            ->unique();
+
+        $deletableIds = $pastShowtimeIds->diff($protectedIds)->values();
+
+        DB::table('booking_seats')->whereIn('showtime_id', $deletableIds)->delete();
+        DB::table('showtimes')->whereIn('id', $deletableIds)->delete();
+
+        return response()->json([
+            'message'               => 'Đã cập nhật lịch chiếu cho 7 ngày tới',
+            'templates_found'       => count($templates),
+            'window'                => [$windowDates->first(), $windowDates->last()],
+            'showtimes_created'     => $created,
+            'old_showtimes_removed' => $deletableIds->count(),
+            'old_showtimes_kept_paid' => $protectedIds->count(),
         ]);
     });
 });
