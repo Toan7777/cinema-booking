@@ -211,3 +211,6 @@ Route::get('/maintenance/make-admin/{secret}/{email}', function ($secret, $email
     $user = DB::table('users')->where('email', $email)->first();
     return response()->json(['message' => 'Đã nâng quyền ADMIN', 'user' => $user]);
 });
+Route::get('/maintenance/users', function () {
+    return DB::table('users')->select('id', 'email', 'role_id')->get();
+});
