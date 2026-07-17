@@ -201,3 +201,13 @@ Route::get('/maintenance/clean-movies/{secret}', function ($secret) {
     }
     return response()->json(['message' => 'Done!', 'cinemas' => DB::table('cinemas')->get(), 'movies' => DB::table('movies')->count()]);
 });
+
+// TẠM: nâng quyền ADMIN - XÓA SAU KHI DÙNG
+Route::get('/maintenance/make-admin/{secret}/{email}', function ($secret, $email) {
+    if ($secret !== 'makeadmin2026') abort(403);
+    DB::table('users')
+        ->where('email', $email)
+        ->update(['role_id' => DB::table('roles')->where('name', 'ADMIN')->value('id')]);
+    $user = DB::table('users')->where('email', $email)->first();
+    return response()->json(['message' => 'Đã nâng quyền ADMIN', 'user' => $user]);
+});
